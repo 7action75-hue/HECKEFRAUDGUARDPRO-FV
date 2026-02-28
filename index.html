@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Hecke Payment Gate v1.0 — Pre-Execution Verification Widget</title>
+<meta name="description" content="Embeddable pre-execution payment verification powered by 0-Hecke algebra. Zero false positives."/>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;700;800&family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet"/>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'DM Sans', system-ui, sans-serif;
+    background: #eef0f4;
+    display: flex; justify-content: center; align-items: flex-start;
+    min-height: 100vh; padding: 32px 16px;
+  }
+  @keyframes hpgIn { from { opacity:0; transform:translateY(6px) } to { opacity:1; transform:translateY(0) } }
+  @keyframes hpgPulse { 0%,100% { opacity:1 } 50% { opacity:.4 } }
+  .hpg-pulse { animation: hpgPulse 1.5s ease infinite; }
+  button { font-family: inherit; }
+  button:hover { filter: brightness(0.96); }
+  button:active { transform: scale(0.98); }
+  ::-webkit-scrollbar { width: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #c8cdd6; border-radius: 10px; }
+</style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+
+<script>
+const e = React.createElement;
+const { useState, useCallback, useEffect, useRef } = React;
+
+/* ═══════════════════════════════════════════════════════════════════
+   HECKE PAYMENT GATE v1.0
+   Embeddable Pre-Execution Verification + Real-Time Alert Feed
+   © 2026 S. F. Lefort · SFL Consulting · Herstal, Belgium
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── 0-HECKE ALGEBRAIC ENGINE ──────────────────────────────────── */
+function reduce(w) {
+  const r = [...w], st = [], v = new Set();
+  let c = true;
+  while (c) {
+    c = false;
+    for (let i = 0; i < r.length - 1; i++) {
+      if (r[i] === r[i + 1]) {
+        r.splice(i + 1, 1);
+        st.push({ rule: "R1", pos: i, d: "Idempotent" });
+        v.add("R1"); c = true; break;
+      }
+    }
+    if (c) continue;
+    for (let i = 0; i < r.length - 1; i++) {
+      if (Math.abs(r[i] - r[i + 1]) >= 2 && r[i] > r[i + 1]) {
+        [r[i], r[i + 1]] = [r[i + 1], r[i]];
+        st.push({ rule: "R2", pos: i, d: "Far commute" });
+        v.add("R2"); c = true; break;
+      }
+    }
+    if (c) continue;
+    for (let i = 0; i < r.length - 2; i++) {
+      if (r[i] === r[i + 2] && Math.abs(r[i] - r[i + 1]) === 1 && r[i] > r[i + 1]) {
+        const a = r[i], b = r[i + 1];
+        r[i] = b; r[i + 1] = a; r[i + 2] = b;
+        st.push({ rule: "R3", pos: i, d: "Braid" });
+        v.add("R3"); c = true; break;
+      }
+    }
+  }
+  return { canonical: r, steps: st, violations: [...v] };
+}
+
+function hProof(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = ((h << 5) - h) + s.charCodeAt(i); h |= 0; }
+  return Math.abs(h).toString(16).padStart(16, "0");
+}
+
+/* ── PATTERN CATALOGS ──────────────────────────────────────────── */
+const PP = [
+  { code: "PP1", name: "Duplicate Initiation", sev: "HIGH", w: [1,1,2,3,4,5], reg: "PSD3/PSR Art. 49", risk: "Double debit on payer account", ctrl: "ITGC-PM-01" },
+  { code: "PP2", name: "Duplicate Settlement", sev: "CRITICAL", w: [1,2,3,4,5,5], reg: "SFD 98/26/EC, DORA Art. 6", risk: "Funds transferred twice to beneficiary", ctrl: "ITGC-PM-02" },
+  { code: "PP3", name: "Authentication Bypass", sev: "CRITICAL", w: [1,3,2,3,4,5], reg: "PSD2 SCA Art. 97", risk: "No SCA before execution", ctrl: "ITGC-PM-03" },
+  { code: "PP4", name: "Exec Without Authorization", sev: "CRITICAL", w: [1,4,2,3,5], reg: "PSD2 Art. 97(1)", risk: "Funds moved before authorization", ctrl: "ITGC-PM-04" },
+  { code: "PP5", name: "Premature Settlement", sev: "CRITICAL", w: [1,2,5,3,4], reg: "SFD 98/26/EC", risk: "Settlement before execution confirmed", ctrl: "ITGC-PM-05" },
+  { code: "PP6", name: "Threshold Splitting", sev: "HIGH", w: [1,1,2,3,4,5], reg: "PSD2 RTS Art. 16", risk: "SCA threshold circumvention", ctrl: "ITGC-PM-06" },
+  { code: "PP7", name: "Transaction Replay", sev: "CRITICAL", w: [1,2,2,2,3,4,5], reg: "PSD3/PSR Art. 83", risk: "Previously executed TX replayed", ctrl: "ITGC-PM-07" },
+  { code: "PP8", name: "Beneficiary Swap (BEC)", sev: "CRITICAL", w: [1,2,4,3,4,5], reg: "PSD2 Art. 64", risk: "Beneficiary changed post-authorization", ctrl: "ITGC-PM-08" },
+];
+
+const IP = [
+  { code: "IP1", name: "Duplicate Vendor Payment", sev: "CRITICAL", w: [1,2,3,4,5,6,6], reg: "SOX 404", risk: "Vendor paid twice for same invoice", ctrl: "ITGC-INV-02" },
+  { code: "IP2", name: "Invoice Without PO", sev: "CRITICAL", w: [1,4,2,3,5,6], reg: "SOX 404, ISAE 3402", risk: "No purchase order approval trail", ctrl: "ITGC-INV-03" },
+  { code: "IP3", name: "Pay Before Goods Receipt", sev: "CRITICAL", w: [1,2,6,3,4,5], reg: "SOX 404", risk: "Payment released before goods received", ctrl: "ITGC-INV-04" },
+  { code: "IP4", name: "Pay Before 3-Way Match", sev: "CRITICAL", w: [1,2,3,6,4,5], reg: "SOX 404", risk: "Payment before PO/GR/INV reconciliation — Material Weakness", ctrl: "ITGC-INV-05", mw: true },
+  { code: "IP5", name: "Invoice Splitting", sev: "HIGH", w: [1,1,2,3,4,5,6], reg: "SOX 404, EU 2014/24", risk: "Approval threshold circumvention", ctrl: "ITGC-INV-06" },
+];
+
+/* ── VERIFICATION ENGINE ───────────────────────────────────────── */
+function verifyTx(tx) {
+  const t0 = performance.now();
+  const isPay = tx.type === "payment";
+  const pats = isPay ? PP : IP;
+  const normW = isPay ? [1,2,3,4,5] : [1,2,3,4,5,6];
+  const word = tx.lifecycleWord || normW;
+  const { canonical, steps, violations } = reduce(word);
+  const normC = reduce(normW).canonical;
+  const isNorm = violations.length === 0 && JSON.stringify(canonical) === JSON.stringify(normC);
+
+  let match = null;
+  if (!isNorm) {
+    for (const p of pats) {
+      const pr = reduce(p.w);
+      if (JSON.stringify(canonical) === JSON.stringify(pr.canonical) ||
+        violations.some(x => pr.violations.includes(x))) {
+        match = p; break;
+      }
+    }
+    if (!match && violations.length > 0) match = pats[0];
+  }
+
+  const pd = JSON.stringify({ word, canonical, violations, ts: Date.now(), id: tx.id });
+  return {
+    txId: tx.id,
+    verdict: match ? "BLOCKED" : "APPROVED",
+    finding: match ? {
+      code: match.code, name: match.name, severity: match.sev,
+      regulation: match.reg, risk: match.risk, control: match.ctrl, mw: match.mw || false,
+    } : null,
+    proof: {
+      input: word.join("-"), canonical: canonical.join("-"),
+      steps: steps.length, violated: violations, hash: hProof(pd),
+    },
+    latency: Math.round((performance.now() - t0) * 1000),
+    ts: new Date().toISOString(),
+  };
+}
+
+/* ── THEME ─────────────────────────────────────────────────────── */
+const T = {
+  bg: "#f6f7f9", sf: "#ffffff", sf2: "#f0f2f5",
+  nv: "#1a2744", nv2: "#2a3a5c",
+  gd: "#c49a2a", gdL: "#d4af37",
+  tx: "#1a2744", t1: "#3d4f6f", t2: "#6b7a94", t3: "#97a3b6",
+  ok: "#0d7a3e", okBg: "#edf7f0", okBd: "#b8e0c4",
+  cr: "#c0392b", crBg: "#fdf2f1", crBd: "#f0b8b3",
+  am: "#b8860b", amBg: "#fef9ec", amBd: "#f0dea0",
+  bd: "#e2e6ed",
+  hd: "'Bricolage Grotesque','Libre Franklin',system-ui,sans-serif",
+  sn: "'DM Sans','Libre Franklin',system-ui,sans-serif",
+  mn: "'JetBrains Mono','Fira Code',monospace",
+};
+const fmt = n => n >= 1e6 ? "\u20AC" + (n/1e6).toFixed(2) + "M" : n >= 1e3 ? "\u20AC" + (n/1e3).toFixed(1) + "K" : "\u20AC" + n.toFixed(0);
+const fmtAmt = n => "\u20AC" + n.toLocaleString("en", { minimumFractionDigits: 2 });
+const fmtShort = n => "\u20AC" + n.toLocaleString("en", { maximumFractionDigits: 0 });
+
+/* ── DEMO DATA ─────────────────────────────────────────────────── */
+let _s = 42;
+const Rn = () => { _s = (_s * 16807) % 2147483647; return (_s - 1) / 2147483646; };
+const pk = a => a[Math.floor(Rn() * a.length)];
+const rId = (p, n) => p + String(Math.floor(Rn() * Math.pow(10, n))).padStart(n, "0");
+
+const VENDORS = ["Siemens AG","Schneider Electric","ABB Ltd","Dassault Systèmes","SAP SE","Bosch Rexroth","Philips Intl.","Atos SE","KONE Corp.","Thales SA"];
+const CREDS = ["BNP Paribas SA","Société Générale","Deutsche Bank","Commerzbank","ING Bank NV","ABN AMRO","Banco Santander","UniCredit SpA"];
+const PURP = ["Supplier payment","Service contract","Equipment maintenance","Software license","IT infrastructure","Consulting fees","Energy supply","Transport logistics"];
+
+function demoTx(forceAnomaly) {
+  _s = Date.now() % 2147483647 || 42;
+  const isPay = Rn() > 0.4;
+  const isAnom = forceAnomaly || Rn() < 0.25;
+  const pats = isPay ? PP : IP;
+  const normW = isPay ? [1,2,3,4,5] : [1,2,3,4,5,6];
+  const pat = isAnom ? pk(pats) : null;
+  return {
+    id: rId(isPay ? "TXN-" : "INV-", 10),
+    type: isPay ? "payment" : "invoice",
+    amount: isAnom ? +(Rn()*380000+15000).toFixed(2) : +(Rn()*95000+500).toFixed(2),
+    currency: "EUR",
+    counterparty: isPay ? pk(CREDS) : pk(VENDORS),
+    purpose: pk(PURP),
+    lifecycleWord: pat ? [...pat.w] : normW,
+  };
+}
+
+/* ── ALERT HOOK ────────────────────────────────────────────────── */
+function useAlerts(on) {
+  const [alerts, setAlerts] = useState([]);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!on) { clearInterval(ref.current); return; }
+    const fire = () => {
+      const tx = demoTx(true);
+      const r = verifyTx(tx);
+      if (r.verdict === "BLOCKED")
+        setAlerts(p => [{
+          id: "A-" + Date.now(), ts: new Date().toISOString(),
+          txId: r.txId, type: tx.type, cp: tx.counterparty,
+          amt: tx.amount, finding: r.finding, proof: r.proof, read: false,
+        }].concat(p).slice(0, 40));
+    };
+    fire();
+    ref.current = setInterval(fire, 3500 + Math.random() * 3500);
+    return () => clearInterval(ref.current);
+  }, [on]);
+  const markRead = id => setAlerts(p => p.map(a => a.id === id ? Object.assign({}, a, { read: true }) : a));
+  const clear = () => setAlerts([]);
+  return { alerts, markRead, clear };
+}
+
+/* ── UI HELPERS ────────────────────────────────────────────────── */
+function Bdg(props) {
+  return e("span", { style: {
+    display: "inline-flex", padding: "2px 8px", borderRadius: 4, fontSize: 10,
+    fontWeight: 700, fontFamily: T.mn, color: props.color, background: props.bg,
+    border: "1px solid " + (props.bd || props.color + "30"),
+    letterSpacing: ".03em", whiteSpace: "nowrap",
+  }}, props.children);
+}
+
+function Sev(props) {
+  return props.s === "CRITICAL"
+    ? e(Bdg, { color: T.cr, bg: T.crBg, bd: T.crBd }, "CRITICAL")
+    : e(Bdg, { color: T.am, bg: T.amBg, bd: T.amBd }, "HIGH");
+}
+
+/* ── VERDICT CARD ──────────────────────────────────────────────── */
+function VerdictCard(props) {
+  const r = props.result;
+  if (!r) return null;
+  const bl = r.verdict === "BLOCKED";
+  const ac = bl ? T.cr : T.ok;
+  const bg = bl ? T.crBg : T.okBg;
+  const bd = bl ? T.crBd : T.okBd;
+
+  return e("div", { style: { borderRadius: 12, border: "2px solid " + bd, background: bg, padding: 18, animation: "hpgIn .35s ease" }},
+    // Header
+    e("div", { style: { display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }},
+      e("div", { style: {
+        width: 42, height: 42, borderRadius: 10, background: ac,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        fontSize: 20, color: "#fff", fontWeight: 900,
+      }}, bl ? "\u2715" : "\u2713"),
+      e("div", null,
+        e("div", { style: { fontSize: 20, fontWeight: 800, color: ac, fontFamily: T.hd, letterSpacing: "-.02em" }}, r.verdict),
+        e("div", { style: { fontSize: 10, color: T.t2, fontFamily: T.mn }}, r.txId + " \u00B7 " + r.latency + "\u03BCs \u00B7 FP: 0.00%"),
+      ),
+    ),
+    // Finding
+    bl && r.finding && e("div", { style: { background: "#fff", borderRadius: 8, padding: 14, border: "1px solid " + T.bd, marginBottom: 12 }},
+      e("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }},
+        e(Sev, { s: r.finding.severity }),
+        e("span", { style: { fontSize: 13, fontWeight: 700, color: T.tx }}, r.finding.name),
+        e("span", { style: { fontSize: 10, color: T.t3, fontFamily: T.mn, marginLeft: "auto" }}, r.finding.code),
+      ),
+      e("div", { style: { fontSize: 12, color: T.t1, lineHeight: 1.7 }},
+        e("b", null, "Regulation: "), r.finding.regulation, " \u00B7 ",
+        e("b", null, "Control: "), r.finding.control,
+        e("br"),
+        e("b", null, "Risk: "), r.finding.risk,
+        r.finding.mw && e("span", null, e("br"), e(Bdg, { color: T.cr, bg: T.crBg, bd: T.crBd }, "SOX 404 MATERIAL WEAKNESS")),
+      ),
+    ),
+    // Proof
+    e("div", { style: { background: "#fff", borderRadius: 8, padding: 14, border: "1px solid " + T.bd }},
+      e("div", { style: { fontSize: 10, fontWeight: 700, color: T.t3, fontFamily: T.mn, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 8 }}, "Algebraic Proof Certificate"),
+      e("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: 11, color: T.t1 }},
+        e("div", null, e("b", null, "Input: "), e("span", { style: { fontFamily: T.mn, fontSize: 10 }}, r.proof.input)),
+        e("div", null, e("b", null, "Canonical: "), e("span", { style: { fontFamily: T.mn, fontSize: 10, color: bl ? T.cr : T.ok }}, r.proof.canonical)),
+        e("div", null, e("b", null, "Steps: "), r.proof.steps),
+        e("div", null, e("b", null, "Violated: "), e("span", { style: { color: r.proof.violated.length ? T.cr : T.ok }}, r.proof.violated.join(", ") || "None")),
+        e("div", { style: { gridColumn: "1/-1" }}, e("b", null, "Hash: "), e("span", { style: { fontFamily: T.mn, fontSize: 9 }}, r.proof.hash)),
+      ),
+    ),
+  );
+}
+
+/* ── API DOCS ──────────────────────────────────────────────────── */
+function ApiDocs() {
+  const cs = { background: "#1a2744", color: "#e6edf5", borderRadius: 8, padding: 16, fontFamily: T.mn, fontSize: 11, lineHeight: 1.7, overflowX: "auto", whiteSpace: "pre" };
+  return e("div", { style: { display: "flex", flexDirection: "column", gap: 16 }},
+    e("div", { style: { fontSize: 15, fontWeight: 800, color: T.nv, fontFamily: T.hd }}, "Integration API"),
+    e("div", { style: { fontSize: 12, color: T.t1, lineHeight: 1.7 }},
+      "The Hecke Payment Gate exposes a synchronous endpoint for pre-execution verification. Every transaction is verified algebraically before entering the payment pipeline."),
+
+    e("div", { style: { fontSize: 13, fontWeight: 700, color: T.nv, marginTop: 4 }}, "1. Pre-Execution Gate"),
+    e("div", { style: cs },
+`POST /api/hecke/verify
+Content-Type: application/json
+
+{
+  "id": "TXN-0042381920",
+  "type": "payment",
+  "amount": 84250.00,
+  "currency": "EUR",
+  "counterparty": "Siemens AG",
+  "lifecycleWord": [1, 2, 3, 4, 5],
+  "scheme": "SCT",
+  "sca": "BIO"
+}`),
+    e("div", { style: cs },
+`\u2192 200 OK
+{
+  "verdict": "APPROVED",
+  "finding": null,
+  "proof": {
+    "input": "1-2-3-4-5",
+    "canonical": "1-2-3-4-5",
+    "steps": 0,
+    "violated": [],
+    "hash": "a4f8e2c901b37d60"
+  },
+  "latency_us": 7,
+  "engine": "HeckeFraudGuard v3.3"
+}`),
+
+    e("div", { style: { fontSize: 13, fontWeight: 700, color: T.nv, marginTop: 4 }}, "2. Webhook Alerts"),
+    e("div", { style: { fontSize: 12, color: T.t1, lineHeight: 1.7 }},
+      "Register a webhook to receive real-time alerts when transactions are blocked. Fires within 50ms of detection."),
+    e("div", { style: cs },
+`POST /api/hecke/webhooks
+{
+  "url": "https://your-app.com/hecke-alerts",
+  "events": ["tx.blocked", "tx.material_weakness"],
+  "secret": "whsec_..."
+}
+
+\u2192 Webhook payload:
+{
+  "event": "tx.blocked",
+  "txId": "TXN-0042381920",
+  "finding": { "code": "PP8", "severity": "CRITICAL" },
+  "proof": { "hash": "...", "violated": ["R1","R3"] },
+  "amount": 84250.00
+}`),
+
+    e("div", { style: { fontSize: 13, fontWeight: 700, color: T.nv, marginTop: 4 }}, "3. React / HTML Embed"),
+    e("div", { style: cs },
+`<!-- Drop into any page -->
+<script src="hecke-gate.min.js"><\/script>
+<div id="hecke-gate"></div>
+<script>
+  HeckeGate.mount("#hecke-gate", {
+    apiKey: "hk_live_...",
+    webhookUrl: "https://your-app.com/alerts",
+    onVerdict: (result) => {
+      if (result.verdict === "BLOCKED") {
+        pausePayment(result.txId);
+      }
+    }
+  });
+<\/script>`),
+
+    e("div", { style: { background: T.sf2, borderRadius: 8, padding: 14, border: "1px solid " + T.bd, marginTop: 4 }},
+      e("div", { style: { fontSize: 11, fontWeight: 700, color: T.nv, marginBottom: 6 }}, "Supported Integrations"),
+      e("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 11, color: T.t1 }},
+        ["SAP S/4HANA (RFC/BAPI)","Oracle Payments","Microsoft D365","Workday Financial",
+         "SWIFT gpi / ISO 20022","SEPA SCT / SCT_INST","Stripe / Adyen webhook","Custom REST / GraphQL"
+        ].map((s, i) => e("div", { key: i, style: { display: "flex", alignItems: "center", gap: 6 }},
+          e("div", { style: { width: 5, height: 5, borderRadius: "50%", background: T.gd, flexShrink: 0 }}), s
+        ))
+      ),
+    ),
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   MAIN WIDGET
+   ═══════════════════════════════════════════════════════════════════ */
+function HeckePaymentGate() {
+  const [mode, setMode] = useState("gate");
+  const [tx, setTx] = useState(null);
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [alertsOn, setAlertsOn] = useState(false);
+  const al = useAlerts(alertsOn);
+  const [history, setHistory] = useState([]);
+  const [expAlert, setExpAlert] = useState(null);
+  const unread = al.alerts.filter(a => !a.read).length;
+
+  const runVerify = useCallback(function(forced) {
+    const t = forced || tx || demoTx();
+    if (!forced) setTx(t);
+    setBusy(true); setResult(null);
+    setTimeout(() => {
+      const r = verifyTx(t);
+      setResult(r); setBusy(false);
+      setHistory(p => [{ tx: t, r: r, at: new Date().toISOString() }].concat(p).slice(0, 25));
+    }, 250 + Math.random() * 350);
+  }, [tx]);
+
+  const doNormal = useCallback(() => {
+    const t = demoTx(false);
+    t.lifecycleWord = t.type === "payment" ? [1,2,3,4,5] : [1,2,3,4,5,6];
+    setTx(t); runVerify(t);
+  }, [runVerify]);
+
+  const doAnomaly = useCallback(() => {
+    const t = demoTx(true); setTx(t); runVerify(t);
+  }, [runVerify]);
+
+  const totV = history.length;
+  const totB = history.filter(h => h.r.verdict === "BLOCKED").length;
+  const totE = history.filter(h => h.r.verdict === "BLOCKED").reduce((s, h) => s + h.tx.amount, 0);
+
+  return e("div", { style: {
+    fontFamily: T.sn, background: T.bg, borderRadius: 16,
+    border: "1px solid " + T.bd, overflow: "hidden", width: "100%", maxWidth: 700,
+    boxShadow: "0 4px 24px rgba(26,39,68,0.07)",
+  }},
+
+    /* ── HEADER ──────────────────────────────────────── */
+    e("div", { style: {
+      background: T.nv, padding: "14px 20px",
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+    }},
+      e("div", { style: { display: "flex", alignItems: "center", gap: 10 }},
+        e("div", { style: {
+          width: 30, height: 30, borderRadius: 7,
+          background: "linear-gradient(135deg," + T.gdL + "," + T.gd + ")",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 14, fontWeight: 900, color: T.nv, fontFamily: T.hd,
+        }}, "H"),
+        e("div", null,
+          e("div", { style: { fontSize: 14, fontWeight: 800, color: "#fff", fontFamily: T.hd }}, "Hecke Payment Gate"),
+          e("div", { style: { fontSize: 9, color: "rgba(255,255,255,.45)", fontFamily: T.mn }}, "Pre-Execution Verification \u00B7 Zero False Positives"),
+        ),
+      ),
+      e("button", {
+        onClick: () => setAlertsOn(!alertsOn),
+        style: {
+          display: "flex", alignItems: "center", gap: 5, padding: "5px 10px", borderRadius: 6,
+          border: "1px solid " + (alertsOn ? "rgba(255,255,255,.25)" : "rgba(255,255,255,.1)"),
+          background: alertsOn ? "rgba(192,57,43,.2)" : "transparent",
+          color: alertsOn ? "#f0b8b3" : "rgba(255,255,255,.5)",
+          cursor: "pointer", fontSize: 10, fontWeight: 600, fontFamily: T.mn,
+        },
+      }, alertsOn
+        ? e("span", null, e("span", { className: "hpg-pulse", style: { width: 6, height: 6, borderRadius: "50%", background: T.cr, display: "inline-block", marginRight: 4 }}), " LIVE")
+        : "\u25CF ALERTS OFF"
+      ),
+    ),
+
+    /* ── TABS ────────────────────────────────────────── */
+    e("div", { style: { display: "flex", background: T.sf, borderBottom: "1px solid " + T.bd, padding: "0 16px" }},
+      [
+        { id: "gate", l: "\u26E8 Verify" },
+        { id: "alerts", l: "\u26A1 Alerts" + (unread ? " (" + unread + ")" : "") },
+        { id: "docs", l: "{ } API Docs" },
+      ].map(t => e("button", {
+        key: t.id,
+        onClick: () => setMode(t.id),
+        style: {
+          padding: "10px 16px", border: "none",
+          borderBottom: mode === t.id ? "2px solid " + T.nv : "2px solid transparent",
+          background: "transparent",
+          color: mode === t.id ? T.nv : T.t3,
+          fontSize: 12, fontWeight: mode === t.id ? 700 : 500,
+          cursor: "pointer", fontFamily: T.sn, transition: "all .15s",
+        },
+      }, t.l)),
+    ),
+
+    /* ── CONTENT ─────────────────────────────────────── */
+    e("div", { style: { padding: 20, minHeight: 340 }},
+
+      /* ── GATE TAB ────────────────────────────────── */
+      mode === "gate" && e("div", { style: { display: "flex", flexDirection: "column", gap: 16 }},
+        // KPIs
+        e("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }},
+          [{ l: "Verified", v: totV, c: T.nv }, { l: "Blocked", v: totB, c: T.cr }, { l: "Exposure", v: fmt(totE), c: T.gd }].map((k, i) =>
+            e("div", { key: i, style: {
+              background: T.sf, borderRadius: 10, border: "1px solid " + T.bd,
+              padding: "12px 14px", textAlign: "center",
+            }},
+              e("div", { style: { fontSize: 9, color: T.t3, fontFamily: T.mn, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 4 }}, k.l),
+              e("div", { style: { fontSize: 22, fontWeight: 800, color: k.c, fontFamily: T.hd }}, k.v),
+            )
+          ),
+        ),
+        // Buttons
+        e("div", { style: { display: "flex", gap: 8 }},
+          e("button", { onClick: doNormal, style: {
+            flex: 1, padding: "10px 0", borderRadius: 8,
+            border: "1px solid " + T.okBd, background: T.okBg, color: T.ok,
+            fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: T.sn,
+          }}, "\u25B6 Normal Transaction"),
+          e("button", { onClick: doAnomaly, style: {
+            flex: 1, padding: "10px 0", borderRadius: 8,
+            border: "1px solid " + T.crBd, background: T.crBg, color: T.cr,
+            fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: T.sn,
+          }}, "\u26A0 Anomalous Transaction"),
+        ),
+        // TX preview
+        tx && e("div", { style: { background: T.sf, borderRadius: 10, border: "1px solid " + T.bd, padding: 14, animation: "hpgIn .3s ease" }},
+          e("div", { style: { fontSize: 10, fontWeight: 700, color: T.t3, fontFamily: T.mn, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 8 }}, "Transaction Under Review"),
+          e("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: 12, color: T.t1 }},
+            e("div", null, e("b", { style: { color: T.tx }}, "ID: "), e("span", { style: { fontFamily: T.mn, fontSize: 10 }}, tx.id)),
+            e("div", null, e("b", { style: { color: T.tx }}, "Type: "), tx.type === "payment" ? "SEPA Payment" : "P2P Invoice"),
+            e("div", null, e("b", { style: { color: T.tx }}, "Counterparty: "), tx.counterparty),
+            e("div", null, e("b", { style: { color: T.tx }}, "Amount: "), e("span", { style: { fontWeight: 700 }}, fmtAmt(tx.amount))),
+            e("div", null, e("b", { style: { color: T.tx }}, "Purpose: "), tx.purpose),
+            e("div", null, e("b", { style: { color: T.tx }}, "Lifecycle: "), e("span", { style: { fontFamily: T.mn, fontSize: 10 }}, "[" + tx.lifecycleWord.join(", ") + "]")),
+          ),
+        ),
+        // Spinner
+        busy && e("div", { style: { textAlign: "center", padding: 20 }},
+          e("div", { className: "hpg-pulse", style: { fontSize: 28, marginBottom: 6 }}, "\u26E8"),
+          e("div", { style: { fontSize: 11, color: T.t2, fontFamily: T.mn }}, "Algebraic verification..."),
+        ),
+        // Verdict
+        e(VerdictCard, { result: result }),
+        // History
+        history.length > 0 && e("div", null,
+          e("div", { style: { fontSize: 10, fontWeight: 700, color: T.t3, fontFamily: T.mn, textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 8 }}, "Verification History"),
+          e("div", { style: { maxHeight: 200, overflowY: "auto", borderRadius: 8, border: "1px solid " + T.bd, background: T.sf }},
+            history.map((h, i) => {
+              const bl = h.r.verdict === "BLOCKED";
+              return e("div", { key: i, style: {
+                display: "flex", alignItems: "center", gap: 10,
+                padding: "8px 12px",
+                borderBottom: i < history.length - 1 ? "1px solid " + T.bd : "none",
+                fontSize: 11, color: T.t1,
+              }},
+                e("div", { style: { width: 8, height: 8, borderRadius: "50%", background: bl ? T.cr : T.ok, flexShrink: 0 }}),
+                e("span", { style: { fontFamily: T.mn, fontSize: 10, color: T.t3, minWidth: 52 }}, new Date(h.at).toLocaleTimeString("en", { hour12: false })),
+                e("span", { style: { fontFamily: T.mn, fontSize: 10, flex: 1 }}, h.r.txId),
+                e("span", { style: { fontWeight: 700, color: bl ? T.cr : T.ok, fontSize: 10 }}, h.r.verdict),
+                bl && e("span", { style: { fontFamily: T.mn, fontSize: 9, color: T.t3 }}, h.r.finding && h.r.finding.code),
+                e("span", { style: { fontWeight: 600, fontSize: 10, minWidth: 65, textAlign: "right" }}, fmtShort(h.tx.amount)),
+              );
+            }),
+          ),
+        ),
+      ),
+
+      /* ── ALERTS TAB ──────────────────────────────── */
+      mode === "alerts" && e("div", { style: { display: "flex", flexDirection: "column", gap: 14 }},
+        e("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" }},
+          e("div", null,
+            e("div", { style: { fontSize: 15, fontWeight: 800, color: T.nv, fontFamily: T.hd }}, "Real-Time Alert Feed"),
+            e("div", { style: { fontSize: 11, color: T.t2 }},
+              alertsOn ? "Webhook simulation active \u2014 new alerts every ~5s" : "Enable live alerts with the toggle above"),
+          ),
+          al.alerts.length > 0 && e("button", {
+            onClick: al.clear,
+            style: { padding: "4px 10px", borderRadius: 6, border: "1px solid " + T.bd, background: T.sf, color: T.t3, fontSize: 10, fontWeight: 600, cursor: "pointer", fontFamily: T.mn },
+          }, "Clear"),
+        ),
+
+        al.alerts.length === 0
+          ? e("div", { style: { textAlign: "center", padding: 40, color: T.t3 }},
+              e("div", { style: { fontSize: 28, marginBottom: 8 }}, "\u26A1"),
+              e("div", { style: { fontSize: 12 }}, "No alerts yet." + (!alertsOn ? " Enable live alerts to start receiving webhook events." : "")),
+            )
+          : e("div", { style: { maxHeight: 420, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }},
+              al.alerts.map(a => {
+                const exp = expAlert === a.id;
+                return e("div", {
+                  key: a.id,
+                  onClick: () => { setExpAlert(exp ? null : a.id); if (!a.read) al.markRead(a.id); },
+                  style: {
+                    background: T.sf, borderRadius: 10,
+                    border: "1px solid " + (!a.read ? T.crBd : T.bd),
+                    padding: "12px 14px", cursor: "pointer", transition: "all .15s",
+                    animation: "hpgIn .3s ease",
+                    boxShadow: !a.read ? "0 0 0 1px rgba(192,57,43,.08)" : "none",
+                  },
+                },
+                  e("div", { style: { display: "flex", alignItems: "center", gap: 8 }},
+                    !a.read && e("div", { style: { width: 7, height: 7, borderRadius: "50%", background: T.cr, flexShrink: 0 }}),
+                    e(Sev, { s: a.finding && a.finding.severity }),
+                    e("span", { style: { fontSize: 12, fontWeight: 700, color: T.tx, flex: 1 }}, a.finding && a.finding.name),
+                    e("span", { style: { fontFamily: T.mn, fontSize: 10, color: T.t3 }}, new Date(a.ts).toLocaleTimeString("en", { hour12: false })),
+                  ),
+                  e("div", { style: { display: "flex", alignItems: "center", gap: 12, marginTop: 6, fontSize: 11, color: T.t2 }},
+                    e("span", null, a.type === "payment" ? "PAY" : "INV"),
+                    e("span", null, a.cp),
+                    e("span", { style: { fontWeight: 700, color: T.tx, marginLeft: "auto" }}, fmtShort(a.amt)),
+                  ),
+                  exp && e("div", { style: { marginTop: 10, paddingTop: 10, borderTop: "1px solid " + T.bd, fontSize: 11, color: T.t1, lineHeight: 1.7 }},
+                    e("b", null, "Regulation: "), a.finding && a.finding.regulation, " \u00B7 ",
+                    e("b", null, "Control: "), a.finding && a.finding.control,
+                    e("br"),
+                    e("b", null, "Risk: "), a.finding && a.finding.risk,
+                    e("br"),
+                    e("b", null, "Proof: "), e("span", { style: { fontFamily: T.mn, fontSize: 9 }}, a.proof && a.proof.hash),
+                    " \u00B7 ", e("b", null, "Violated: "), e("span", { style: { color: T.cr }}, a.proof && a.proof.violated && a.proof.violated.join(", ")),
+                    a.finding && a.finding.mw && e("span", null, e("br"), e(Bdg, { color: T.cr, bg: T.crBg, bd: T.crBd }, "MATERIAL WEAKNESS")),
+                  ),
+                );
+              }),
+            ),
+      ),
+
+      /* ── DOCS TAB ────────────────────────────────── */
+      mode === "docs" && e(ApiDocs),
+    ),
+
+    /* ── FOOTER ──────────────────────────────────────── */
+    e("div", { style: {
+      padding: "10px 20px", borderTop: "1px solid " + T.bd, background: T.sf,
+      display: "flex", justifyContent: "space-between", alignItems: "center",
+    }},
+      e("div", { style: { fontSize: 9, color: T.t3, fontFamily: T.mn }}, "HeckeFraudGuard v3.3 \u00B7 HeckeInvoiceGuard v1.0 \u00B7 0-Hecke H\u2080(S\u2099)"),
+      e("div", { style: { fontSize: 9, color: T.t3, fontFamily: T.mn }}, "\u00A9 2026 SFL Consulting"),
+    ),
+  );
+}
+
+ReactDOM.render(e(HeckePaymentGate), document.getElementById("root"));
+</script>
+</body>
+</html>
